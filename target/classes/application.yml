@@ -1,0 +1,7 @@
+monitoring:
+  metrics:
+    export:
+      statsd:
+        host: localhost
+        port: 8125
+        prefix: example-app
