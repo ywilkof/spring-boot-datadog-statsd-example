@@ -1,5 +1,6 @@
 package com.yonatanwilkof.example;
 
+import com.codahale.metrics.Gauge;
 import com.codahale.metrics.MetricRegistry;
 import org.coursera.metrics.datadog.model.DatadogGauge;
 import org.coursera.metrics.datadog.transport.UdpTransport;
@@ -57,42 +58,51 @@ public class MetricExportConfiguration {
     }
 
     @Scheduled(fixedDelay = 30000, initialDelay = 30000)
-    void exportPublicMetrics() throws IOException {
+    void exportPublicMetricsAndTransport() throws IOException {
         for (Metric<?> metric : metricReaderPublicMetrics.metrics()) {
-            transport.prepare().addGauge(new DatadogGauge("endpoint.counter",
-                    metric.getValue().longValue(),
-                    metric.getTimestamp().getTime() / 1000,
-                    HOSTNAME,
-                    getEndpointCounterTags(metric.getName())));
-            getEndpointTimingTag(metric.getName()).ifPresent(t-> {
-                try {
-                    transport.prepare()
-                            .addGauge(new DatadogGauge("endpoint.timer",
-                                    metric.getValue().longValue(),
-                                    metric.getTimestamp().getTime() / 1000,
-                                    HOSTNAME,
-                                    Collections.singletonList(t)));
-                } catch (IOException e) {
-//                    log.error("failed sending endpoint.timer gauge");
-                }
-            });
+            if (metric.getName().startsWith("counter.status.")) {
+                final String statusCode = metric.getName().substring(15, 18);
+                final String endpoint = metric.getName().substring(19);
+                final List<String> tags = Arrays.asList("endpoint:" + endpoint, "status-code:" + statusCode);
+                transport.prepare().addGauge(new DatadogGauge("endpoint.counter",
+                        metric.getValue().longValue(),
+                        metric.getTimestamp().getTime() / 1000,
+                        HOSTNAME,
+                        tags));
+            }
+            else if (metric.getName().startsWith("gauge.response.")) {
+                transport.prepare()
+                        .addGauge(new DatadogGauge("endpoint.timer",
+                                metric.getValue().longValue(),
+                                metric.getTimestamp().getTime() / 1000,
+                                HOSTNAME,
+                                Collections.singletonList(metric.getName().substring(15))));
+            }
         }
     }
 
-    // e.g. counter.status.200.api.v1.pets
-    private static List<String> getEndpointCounterTags(String metric) {
-        if (metric.startsWith(COUNTER_STATUS_PREFIX)) {
-            final String statusCode = metric.substring(15, 18);
-            final String endpoint = metric.substring(19);
-            return Arrays.asList(ENDPOINT_TAG + endpoint, STATUS_CODE_TAG + statusCode);
-        } else {
-            return Collections.emptyList();
+    @Scheduled(fixedDelay = 30000, initialDelay = 30000)
+    void exportPublicMetricsAndRegister() throws IOException {
+        for (Metric<?> metric : metricReaderPublicMetrics.metrics()) {
+
+            final Gauge<Long> gauge = () -> metric.getValue().longValue();
+            if (metric.getName().startsWith("counter.status.")) {
+
+                final String statusCode = metric.getName().substring(15, 18);
+                final String endpoint = metric.getName().substring(19);
+
+                final String countMetricWithTags = "endpoint.counter[" +
+                        String.join(",", "endpoint:" + endpoint, "status-code:" + statusCode)
+                        + "]";
+                metricRegistry.remove(countMetricWithTags); // to avoid IllegalArgumentException
+                metricRegistry.register(countMetricWithTags, gauge);
+
+            } else if (metric.getName().startsWith("gauge.response.")) {
+                final String timerMetricWithTag = "endpoint.timer[endpoint:" + metric.getName().substring(15) + "]";
+                metricRegistry.remove(timerMetricWithTag);
+                metricRegistry.register(timerMetricWithTag, gauge);
+            }
         }
     }
-
-    // e.g. gauge.response.api.v1.pets
-    private static Optional<String> getEndpointTimingTag(String metric) {
-        return Optional.of(metric).filter(m -> m.startsWith(GAUGE_RESPONSE))
-                .map(m-> ENDPOINT_TAG + m.substring(15));
-    }
+    
 }
